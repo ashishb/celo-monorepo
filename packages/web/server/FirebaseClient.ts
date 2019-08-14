@@ -1,5 +1,5 @@
-import * as firebasePackage from 'firebase'
 import * as firebase from 'firebase/app'
+import 'firebase/auth'
 import 'firebase/database'
 import getConfig from 'next/config'
 
@@ -15,9 +15,9 @@ async function getFirebase() {
     }
     try {
       // Source: https://firebase.google.com/docs/auth
-      await firebasePackage.auth().signInWithEmailAndPassword(loginUsername, loginPassword)
+      await firebase.auth().signInWithEmailAndPassword(loginUsername, loginPassword)
     } catch (e) {
-      console.error(`Fail to login into Firebase with usern: ${e}`)
+      console.error(`Fail to login into Firebase: ${e}`)
       throw e
     }
   }
