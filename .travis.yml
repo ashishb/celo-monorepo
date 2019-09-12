@@ -1,0 +1,115 @@
+# https://stackoverflow.com/questions/27644586/how-to-set-up-travis-ci-with-multiple-languages
+matrix:
+  include:
+    # Source: https://medium.com/@harmittaa/travis-ci-android-example-357f6e632fc4
+    # Source: https://stackoverflow.com/a/28751112/434196
+    - name: Test on Android API 24
+      language: android
+      sudo: false
+      jdk: oraclejdk8
+      # https://docs.travis-ci.com/user/languages/android/#caching
+      before_cache:
+        # Do not cache a few Gradle files/directories (see https://docs.travis-ci.com/user/languages/java/#Caching)
+        - rm -f $HOME/.gradle/caches/modules-2/modules-2.lock
+        - rm -rf $HOME/.gradle/caches/*/plugin-resolution/
+      cache:
+        directories:
+          # Gradle dependencies
+          - $HOME/.gradle/caches/
+          - $HOME/.gradle/wrapper/
+          # Node modules to speed up build
+          - node_modules
+          - packages/contractkit/node_modules/
+          - packages/mobile/node_modules/
+          - packages/walletkit/node_modules/
+          - packages/react-components/node_modules/
+          # Android SDK
+          - $HOME/android-sdk-dl
+          - $HOME/android-sdk
+          # Android build cache (see http://tools.android.com/tech-docs/build-cache)
+          - $HOME/.android/build-cache
+      env:
+        global:
+          - DX_HEAP_SIZE=2048
+          - ANDROID_API_LEVEL=24
+          - ANDROID_EMU_API_LEVEL=24
+          - ANDROID_ABI=armeabi-v7a
+          - QEMU_AUDIO_DRV=none  # Remove audio
+          - ADB_INSTALL_TIMEOUT=20  # minutes (2 minutes by default)
+          - ANDROID_HOME=$HOME/android-sdk
+          # "emulator" commands needs this
+          - ANDROID_SDK_ROOT=$HOME/android-sdk
+          # detox config in packages/mobile/package.json is hard-coded to use this name.
+          - AVD_NAME=Nexus_5X_API_28_x86
+
+      install:
+        - set -e
+        - touch $HOME/.android/repositories.cfg
+        # Download and unzip the Android SDK tools (if not already there thanks to the cache mechanism)
+        # Latest version available here: https://developer.android.com/studio/#command-tools
+        - if test ! -e $HOME/android-sdk-dl/sdk-tools.zip ; then curl https://dl.google.com/android/repository/sdk-tools-linux-4333796.zip > $HOME/android-sdk-dl/sdk-tools.zip ; fi
+        - unzip -qq -n $HOME/android-sdk-dl/sdk-tools.zip -d $HOME/android-sdk
+
+        # Install or update Android SDK components (will not do anything if already up to date thanks to the cache mechanism)
+        # - echo y | $HOME/android-sdk/tools/bin/sdkmanager "emulator" > /dev/null
+        - echo y | $HOME/android-sdk/tools/bin/sdkmanager 'tools' > /dev/null
+        - echo y | $HOME/android-sdk/tools/bin/sdkmanager 'platform-tools' > /dev/null
+        - echo y | $HOME/android-sdk/tools/bin/sdkmanager "platforms;android-$ANDROID_API_LEVEL" > /dev/null
+        - echo y | $HOME/android-sdk/tools/bin/sdkmanager "system-images;android-$ANDROID_API_LEVEL;default;$ANDROID_ABI" > /dev/null
+        - echo y | $HOME/android-sdk/tools/bin/sdkmanager "system-images;android-$ANDROID_EMU_API_LEVEL;default;$ANDROID_ABI" > /dev/null
+
+      before_script:
+        - set -eo pipefail
+        # Android setup
+        - echo no | $HOME/android-sdk/tools/bin/avdmanager create avd --force -n $AVD_NAME --tag default --abi $ANDROID_ABI --package "system-images;android-$ANDROID_API_LEVEL;default;$ANDROID_ABI"
+
+        # Source: https://discuss.bitrise.io/t/emulator-with-name-nexus-6-api-26-has-a-corrupt-config-ini-file-try-fixing-it-by-recreating-an-emulator/8438/5
+        - echo -e "hw.lcd.height=1280\nhw.lcd.width=800\nhw.lcd.density=120\nskin.name=240x426" >> $HOME/.android/avd/$AVD_NAME.avd/config.ini
+
+        # # This solves "version `GLIBC_2.17' not found""
+        # - sudo apt-get remove libc6
+        # - wget http://launchpadlibrarian.net/130796948/libc6_2.17-0ubuntu4_i386.deb
+        # - sudo dpkg -i libc6_2.17-0ubuntu4_i386.deb
+        # - wget http://launchpadlibrarian.net/130794928/libc6_2.17-0ubuntu4_amd64.deb
+        # - sudo dpkg -i libc6_2.17-0ubuntu4_amd64.deb
+
+        # # Directly calling emulator command fails, taking fix from here.
+        # # https://www.bram.us/2017/05/12/launching-the-android-emulator-from-the-command-line/
+        # - alias emulator=$HOME/android-sdk/emulator/emulator
+        # -noaudio is not supported by this version of the emulator
+        - emulator -avd $AVD_NAME -no-window -no-boot-anim &
+
+        # While emulator is starting up, install other packages
+        - sudo apt-get update
+        - curl -sL https://deb.nodesource.com/setup_10.x | sudo -E bash -
+        - sudo apt-get install -y libssl-dev curl nodejs
+        - nvm install 8.13
+        - nvm use 8.13
+        - npm install --global yarn  # upgrade yarn
+
+        # TODO: consider deleting packages unrelated to mobile like web or celotool to speed up yarn.
+        # - echo "Deleting some reudundant packages for faster yarn"
+        # - rm -rf packages/{analytics,blockchain-api,cli,dappkit,docs,faucet,helm-charts}
+        # - rm -rf packages/{terraform-modules,verification-pool-api,verifier,web}
+        # - ls -l packages/
+        - yarn
+
+        # Without this detox fails with 
+        # detox[11851] ERROR: [cli.js] Error: Command failed: node_modules/.bin/jest --config=e2e/config.json --maxWorkers=1 '--testNamePattern=^((?!:ios:).)*$' --detectOpenHandles "e2e"
+        - ln -s $PWD/node_modules/jest/bin/jest.js packages/mobile/node_modules/.bin/jest
+        # detox seems to need this
+        - touch $HOME/.emulator_console_auth_token
+
+        - cd packages/mobile
+        - yarn build:sdk integration        
+        # Now wait for emulator to start
+        - android-wait-for-emulator
+      script:
+        - set -eo pipefail
+        - yarn start:bg
+        - yarn test:detox || yarn test:detox
+
+# Good .travis.yml files to learn from
+# https://github.com/ruboto/ruboto/blob/master/.travis.yml
+# https://raw.githubusercontent.com/BanzaiMan/travis_production_test/bc25099f9bd413c43cee9e7118e8eee4b1448fd6/.travis.yml
+# Android build caching https://medium.com/@bod/cache-your-android-sdk-with-travis-c816b9264708
